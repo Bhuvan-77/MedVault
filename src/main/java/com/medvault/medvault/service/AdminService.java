@@ -33,6 +33,7 @@ public class AdminService {
     private final MedicalRecordRepository medicalRecordRepository;
     private final HealthRecordRepository healthRecordRepository;
     private final DoctorVerificationRepository doctorVerificationRepository;
+    private final NotificationService notificationService;
 
     public AdminService(
             UserRepository userRepository,
@@ -41,7 +42,8 @@ public class AdminService {
             AppointmentRepository appointmentRepository,
             MedicalRecordRepository medicalRecordRepository,
             HealthRecordRepository healthRecordRepository,
-            DoctorVerificationRepository doctorVerificationRepository) {
+            DoctorVerificationRepository doctorVerificationRepository,
+            NotificationService notificationService) {
         this.userRepository = userRepository;
         this.doctorProfileRepository = doctorProfileRepository;
         this.patientProfileRepository = patientProfileRepository;
@@ -49,6 +51,7 @@ public class AdminService {
         this.medicalRecordRepository = medicalRecordRepository;
         this.healthRecordRepository = healthRecordRepository;
         this.doctorVerificationRepository = doctorVerificationRepository;
+        this.notificationService = notificationService;
     }
 
     // ===== Dashboard Overview =====
@@ -178,8 +181,30 @@ public class AdminService {
     public void updateAppointmentStatus(Long appointmentId, String status) {
         Appointment apt = appointmentRepository.findById(appointmentId)
                 .orElseThrow(() -> new RuntimeException("Appointment not found"));
+        String oldStatus = apt.getStatus();
         apt.setStatus(status);
         appointmentRepository.save(apt);
+
+        if (oldStatus == null || !oldStatus.equalsIgnoreCase(status)) {
+            if (apt.getPatient() != null && apt.getPatient().getUser() != null) {
+                notificationService.notifyUser(
+                        apt.getPatient().getUser(),
+                        "APPOINTMENT_STATUS_UPDATED",
+                        "Appointment " + status,
+                        "Admin updated your appointment status to " + status + ".",
+                        "/patient/appointments"
+                );
+            }
+            if (apt.getDoctor() != null && apt.getDoctor().getUser() != null) {
+                notificationService.notifyUser(
+                        apt.getDoctor().getUser(),
+                        "APPOINTMENT_STATUS_UPDATED",
+                        "Appointment " + status,
+                        "Admin updated an appointment status to " + status + ".",
+                        "/doctor/appointments"
+                );
+            }
+        }
     }
 
     public void deleteAppointment(Long appointmentId) {
@@ -267,6 +292,16 @@ public class AdminService {
         v.setRejectionReason(null);
         v.setReviewedAt(java.time.LocalDateTime.now());
         doctorVerificationRepository.save(v);
+
+        if (v.getDoctorProfile() != null && v.getDoctorProfile().getUser() != null) {
+            notificationService.notifyUser(
+                    v.getDoctorProfile().getUser(),
+                    "DOCTOR_VERIFICATION_APPROVED",
+                    "Verification Approved",
+                    "Your verification request has been approved by admin.",
+                    "/doctor/profile"
+            );
+        }
     }
 
     public void rejectVerification(Long verificationId, String reason) {
@@ -276,5 +311,16 @@ public class AdminService {
         v.setRejectionReason(reason);
         v.setReviewedAt(java.time.LocalDateTime.now());
         doctorVerificationRepository.save(v);
+
+        if (v.getDoctorProfile() != null && v.getDoctorProfile().getUser() != null) {
+            String rejectionReason = (reason == null || reason.isBlank()) ? "No reason provided" : reason;
+            notificationService.notifyUser(
+                    v.getDoctorProfile().getUser(),
+                    "DOCTOR_VERIFICATION_REJECTED",
+                    "Verification Rejected",
+                    "Your verification request was rejected. Reason: " + rejectionReason,
+                    "/doctor/profile"
+            );
+        }
     }
 }

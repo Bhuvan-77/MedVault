@@ -114,6 +114,7 @@ public class AuthService {
     private final AppointmentRepository appointmentRepository;
     private final DoctorVerificationRepository doctorVerificationRepository;
     private final RecordAccessRequestRepository recordAccessRequestRepository;
+    private final NotificationService notificationService;
 
     public AuthService(UserRepository userRepository,
                        PatientProfileRepository patientProfileRepository,
@@ -123,7 +124,8 @@ public class AuthService {
                        DoctorProfileRepository doctorProfileRepository,
                        AppointmentRepository appointmentRepository,
                        DoctorVerificationRepository doctorVerificationRepository,
-                       RecordAccessRequestRepository recordAccessRequestRepository) {
+                       RecordAccessRequestRepository recordAccessRequestRepository,
+                       NotificationService notificationService) {
 
         this.userRepository = userRepository;
         this.patientProfileRepository = patientProfileRepository;
@@ -134,6 +136,7 @@ public class AuthService {
         this.appointmentRepository = appointmentRepository;
         this.doctorVerificationRepository = doctorVerificationRepository;
         this.recordAccessRequestRepository = recordAccessRequestRepository;
+        this.notificationService = notificationService;
     }
 
     public String register(RegisterRequest request) {
@@ -323,6 +326,10 @@ public class AuthService {
         MedicalRecord record = medicalRecordRepository.findByIdAndPatient(recordId, patient)
                 .orElseThrow(() -> new RuntimeException("Record not found"));
 
+        if ("prescriptions".equalsIgnoreCase(record.getCategory())) {
+            throw new RuntimeException("Prescription records cannot be deleted");
+        }
+
         deleteStoredFile(record.getFilePath());
         medicalRecordRepository.delete(record);
     }
@@ -377,7 +384,17 @@ public class AuthService {
         prescription.setDoctor(doctor);
         prescription.setPatient(patient);
 
-        return prescriptionRepository.save(prescription);
+        Prescription saved = prescriptionRepository.save(prescription);
+
+        notificationService.notifyUser(
+            patientUser,
+            "PRESCRIPTION_UPLOADED",
+            "New Prescription Available",
+            "Dr. " + doctorUser.getName() + " uploaded a new prescription for you.",
+            "/patient/prescriptions"
+        );
+
+        return saved;
     }
 
     public List<Prescription> getPatientPrescriptions(String email) {
@@ -608,7 +625,25 @@ public class AuthService {
             }
         }
 
-        return appointmentRepository.save(appointment);
+        Appointment saved = appointmentRepository.save(appointment);
+
+        notificationService.notifyUser(
+            doctor.getUser(),
+            "APPOINTMENT_REQUEST",
+            "New Appointment Request",
+            "A new appointment request was submitted by " + patientUser.getName() + ".",
+            "/doctor/appointments"
+        );
+
+        notificationService.notifyUser(
+            patientUser,
+            "APPOINTMENT_BOOKED",
+            "Appointment Requested",
+            "Your appointment request has been sent to Dr. " + doctor.getUser().getName() + ".",
+            "/patient/appointments"
+        );
+
+        return saved;
     }
         public List<Map<String, Object>> getDoctorAppointments(String email) {
 
@@ -671,6 +706,15 @@ public class AuthService {
             accessRequest.setApprovedRecordIds(new ArrayList<>());
 
             RecordAccessRequest saved = recordAccessRequestRepository.save(accessRequest);
+
+            notificationService.notifyUser(
+                appointment.getPatient().getUser(),
+                "RECORD_REQUEST_CREATED",
+                "Doctor Requested Records",
+                "Dr. " + doctorUser.getName() + " requested access to your medical records.",
+                "/patient/requests"
+            );
+
             return toRecordAccessRequestResponse(saved);
             }
 
@@ -751,6 +795,16 @@ public class AuthService {
 
             accessRequest.setRespondedAt(java.time.LocalDateTime.now());
             RecordAccessRequest saved = recordAccessRequestRepository.save(accessRequest);
+
+            String responseAction = "APPROVED".equalsIgnoreCase(saved.getStatus()) ? "approved" : "rejected";
+            notificationService.notifyUser(
+                accessRequest.getDoctor().getUser(),
+                "RECORD_REQUEST_RESPONSE",
+                "Record Request " + responseAction.substring(0, 1).toUpperCase() + responseAction.substring(1),
+                "Patient " + patientUser.getName() + " " + responseAction + " your record access request.",
+                "/doctor/patients"
+            );
+
             return toRecordAccessRequestResponse(saved);
             }
 
@@ -758,6 +812,8 @@ public class AuthService {
 
         Appointment appointment = appointmentRepository.findById(appointmentId)
                 .orElseThrow(() -> new RuntimeException("Appointment not found"));
+
+        String oldStatus = appointment.getStatus();
 
         if ("COMPLETED".equalsIgnoreCase(status)) {
             throw new RuntimeException("Use prescription flow to complete an appointment");
@@ -776,7 +832,19 @@ public class AuthService {
 
         appointment.setStatus(status);
 
-        return appointmentRepository.save(appointment);
+        Appointment saved = appointmentRepository.save(appointment);
+
+        if (oldStatus == null || !oldStatus.equalsIgnoreCase(status)) {
+            notificationService.notifyUser(
+                    appointment.getPatient().getUser(),
+                    "APPOINTMENT_STATUS_UPDATED",
+                    "Appointment " + status,
+                    "Your appointment with Dr. " + appointment.getDoctor().getUser().getName() + " is now " + status + ".",
+                    "/patient/appointments"
+            );
+        }
+
+        return saved;
     }
 
     // ===== Doctor Verification =====
@@ -806,6 +874,22 @@ public class AuthService {
         verification.setReviewedAt(null);
 
         doctorVerificationRepository.save(verification);
+
+        notificationService.notifyRole(
+            Role.ADMIN,
+            "DOCTOR_VERIFICATION_SUBMITTED",
+            "New Doctor Verification Request",
+            "Dr. " + user.getName() + " submitted a verification request.",
+            "/admin/doctors"
+        );
+
+        notificationService.notifyUser(
+            user,
+            "DOCTOR_VERIFICATION_SUBMITTED",
+            "Verification Submitted",
+            "Your verification request was submitted and is pending admin review.",
+            "/doctor/profile"
+        );
 
         Map<String, Object> resp = new HashMap<>();
         resp.put("message", "Verification request submitted successfully");
@@ -883,6 +967,14 @@ public class AuthService {
         appointment.setStatus("COMPLETED");
         appointmentRepository.save(appointment);
 
+        notificationService.notifyUser(
+            appointment.getPatient().getUser(),
+            "APPOINTMENT_COMPLETED",
+            "Appointment Completed",
+            "Your appointment with Dr. " + doctorUser.getName() + " is completed. A new prescription is available.",
+            "/patient/prescriptions"
+        );
+
         Map<String, Object> response = new HashMap<>();
         response.put("message", "Prescription created and appointment marked as COMPLETED");
         response.put("appointmentId", appointment.getId());
@@ -937,10 +1029,7 @@ public class AuthService {
                     .collect(Collectors.toList());
         }
 
-        return medicalRecordRepository.findByPatientAndSharedWithDoctorsTrue(patient)
-                .stream()
-                .sorted(Comparator.comparing(MedicalRecord::getUploadedDate, Comparator.nullsLast(Comparator.naturalOrder())).reversed())
-                .collect(Collectors.toList());
+        return Collections.emptyList();
     }
 
     private Map<String, Object> toDoctorAppointmentResponse(Appointment appointment) {

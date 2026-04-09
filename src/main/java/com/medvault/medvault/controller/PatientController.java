@@ -74,9 +74,12 @@ public class PatientController {
     public ResponseEntity<?> deleteRecord(
             @PathVariable Long recordId,
             @RequestParam String email) {
-
-        authService.deletePatientRecord(email, recordId);
-        return ResponseEntity.ok("Record deleted successfully");
+        try {
+            authService.deletePatientRecord(email, recordId);
+            return ResponseEntity.ok("Record deleted successfully");
+        } catch (RuntimeException ex) {
+            return ResponseEntity.badRequest().body(ex.getMessage());
+        }
     }
 
     @PutMapping("/records/{recordId}/share")
